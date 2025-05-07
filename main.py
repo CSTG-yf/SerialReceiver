@@ -141,6 +141,7 @@ class SerialReceiverApp:
         self.baudrate_comboboxes = []
         self.receive_texts = []
         self.connect_btns = []
+        self.save_btns = []  # 新增保存按钮列表
         self.active_receivers = [None] * self.max_ports
 
         # 获取新的串口数量
@@ -187,6 +188,21 @@ class SerialReceiverApp:
                                                      state='disabled', height=10)
             receive_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
             self.receive_texts.append(receive_text)
+
+            # 底部按钮区域 - 新增部分
+            btn_frame = tk.Frame(port_frame)
+            btn_frame.pack(fill=tk.X, padx=5, pady=2)
+
+            # 清空按钮
+            clear_btn = tk.Button(btn_frame, text="清空",
+                                  command=lambda idx=i: self.clear_receive(idx))
+            clear_btn.pack(side=tk.LEFT, padx=2)
+
+            # 保存按钮
+            save_btn = tk.Button(btn_frame, text="保存",
+                                 command=lambda idx=i: self.save_data(idx))
+            save_btn.pack(side=tk.RIGHT, padx=2)
+            self.save_btns.append(save_btn)  # 将保存按钮添加到列表中
 
         # 刷新所有端口列表
         self.refresh_all_ports()
