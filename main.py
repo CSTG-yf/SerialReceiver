@@ -1,7 +1,8 @@
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QComboBox, QPushButton, QTextEdit, QGroupBox, QScrollArea, QFileDialog,
-                             QMessageBox, QFrame, QGridLayout)
+                             QMessageBox, QFrame, QGridLayout, QSizePolicy)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QColor
 from serial_receiver import SerialReceiver, SerialConfig
 import sys
 
@@ -39,6 +40,18 @@ class SerialPortWidget(QGroupBox):
         self.connect_btn.clicked.connect(self.toggle_connection)
         config_layout.addWidget(self.connect_btn)
 
+        # 错误信息显示标签
+        self.error_label = QLabel()
+        self.error_label.setStyleSheet("""
+                    color: red; 
+                    font-size: 13px;
+                    font-weight: bold;
+                    padding: 2px;
+                """)
+        self.error_label.setWordWrap(True)
+        self.error_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        config_layout.addWidget(self.error_label)
+
         config_layout.addStretch()
         layout.addLayout(config_layout)
 
@@ -67,6 +80,26 @@ class SerialPortWidget(QGroupBox):
 
         self.setLayout(layout)
 
+    def refresh_ports(self, ports: list):
+        """刷新端口列表"""
+        current = self.port_combo.currentText()
+        self.port_combo.clear()
+        self.port_combo.addItems(ports)
+        if current in ports:
+            self.port_combo.setCurrentText(current)
+        elif ports:
+            self.port_combo.setCurrentIndex(0)
+
+    def show_error(self, message: str):
+        """显示错误信息"""
+        self.error_label.setText(message)
+        self.error_label.setToolTip(message)  # 添加悬停提示
+
+    def clear_error(self):
+        """清除错误信息"""
+        self.error_label.clear()
+        self.error_label.setToolTip("")
+
     def toggle_connection(self):
         """切换连接状态"""
         if self.serial_receiver and self.serial_receiver.is_connected:
@@ -78,8 +111,10 @@ class SerialPortWidget(QGroupBox):
         """连接串口"""
         port = self.port_combo.currentText()
         if not port:
-            QMessageBox.critical(self, "错误", f"串口 {self.port_index + 1} 请选择串口号")
+            self.show_error("请选择串口号")
             return
+
+        self.clear_error()  # 清除之前的错误信息
 
         try:
             config = SerialConfig(
@@ -93,14 +128,29 @@ class SerialPortWidget(QGroupBox):
             # 创建新的接收器
             self.serial_receiver = SerialReceiver(config, self.port_index)
             self.serial_receiver.data_received.connect(self.on_data_received)
+            self.serial_receiver.error_occurred.connect(self.on_serial_error)
             self.serial_receiver.start()
 
             self.connect_btn.setText("断开")
             self.port_combo.setEnabled(False)
             self.baudrate_combo.setEnabled(False)
 
+        except serial.SerialException as e:
+            error_msg = f"串口错误: {str(e)}"
+            if "PermissionError" in str(e):
+                error_msg = "串口已被占用"
+            elif "FileNotFoundError" in str(e):
+                error_msg = "串口不存在"
+            self.show_error(error_msg)
+        except ValueError as e:
+            self.show_error(f"无效参数: {str(e)}")
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"串口 {self.port_index + 1} 无法打开:\n{str(e)}")
+            self.show_error(f"未知错误: {str(e)}")
+
+    def on_serial_error(self, error_msg: str):
+        """处理串口错误信号"""
+        self.show_error(error_msg)
+        self.disconnect_serial()
 
     def disconnect_serial(self):
         """断开串口连接"""
@@ -142,17 +192,7 @@ class SerialPortWidget(QGroupBox):
                     f.write(self.receive_text.toPlainText())
                 QMessageBox.information(self, "成功", f"串口 {self.port_index + 1} 数据保存成功")
             except Exception as e:
-                QMessageBox.critical(self, "错误", f"串口 {self.port_index + 1} 保存失败:\n{str(e)}")
-
-    def refresh_ports(self, ports: list):
-        """刷新端口列表"""
-        current = self.port_combo.currentText()
-        self.port_combo.clear()
-        self.port_combo.addItems(ports)
-        if current in ports:
-            self.port_combo.setCurrentText(current)
-        elif ports:
-            self.port_combo.setCurrentIndex(0)
+                self.show_error(f"保存失败: {str(e)}")
 
 
 class SerialReceiverApp(QMainWindow):
@@ -278,6 +318,7 @@ class SerialReceiverApp(QMainWindow):
         ports = SerialReceiver.get_available_ports()
         for widget in self.port_widgets:
             widget.refresh_ports(ports)
+            widget.clear_error()  # 刷新时清除错误信息
 
     def closeEvent(self, event):
         """窗口关闭事件处理"""

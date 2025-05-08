@@ -16,6 +16,7 @@ class SerialConfig:
 
 class SerialReceiver(QThread):
     data_received = pyqtSignal(str)  # 数据接收信号
+    error_occurred = pyqtSignal(str)  # 错误发生信号
 
     def __init__(self, config: SerialConfig, port_index: int):
         super().__init__()
@@ -39,16 +40,27 @@ class SerialReceiver(QThread):
             self._is_connected = True
 
             while not self._should_stop and self.serial_port and self.serial_port.is_open:
-                if self.serial_port.in_waiting > 0:
-                    data = self.serial_port.read(self.serial_port.in_waiting)
-                    try:
-                        text_data = data.decode('utf-8', errors='replace')
-                    except:
-                        text_data = str(data)
-                    self.data_received.emit(text_data)
+                try:
+                    if self.serial_port.in_waiting > 0:
+                        data = self.serial_port.read(self.serial_port.in_waiting)
+                        try:
+                            text_data = data.decode('utf-8', errors='replace')
+                        except:
+                            text_data = str(data)
+                        self.data_received.emit(text_data)
+                except serial.SerialException as e:
+                    self.error_occurred.emit(f"串口读取错误: {str(e)}")
+                    break
 
+        except serial.SerialException as e:
+            error_msg = f"串口连接错误: {str(e)}"
+            if "PermissionError" in str(e):
+                error_msg = "串口已被占用"
+            elif "FileNotFoundError" in str(e):
+                error_msg = "串口不存在"
+            self.error_occurred.emit(error_msg)
         except Exception as e:
-            self.data_received.emit(f"\nReceive error: {e}\n")
+            self.error_occurred.emit(f"未知错误: {str(e)}")
         finally:
             if self.serial_port and self.serial_port.is_open:
                 self.serial_port.close()
