@@ -1,3 +1,4 @@
+import serial
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QComboBox, QPushButton, QTextEdit, QGroupBox, QScrollArea, QFileDialog,
                              QMessageBox, QFrame, QGridLayout, QSizePolicy)
