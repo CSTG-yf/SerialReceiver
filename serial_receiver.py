@@ -1,8 +1,8 @@
 import serial
 import serial.tools.list_ports
-import threading
+from PyQt5.QtCore import QThread, pyqtSignal
 from dataclasses import dataclass
-from typing import Callable, Optional
+
 
 @dataclass
 class SerialConfig:
@@ -13,66 +13,59 @@ class SerialConfig:
     stopbits: float = 1
     timeout: float = 1
 
-class SerialReceiver:
-    def __init__(self, data_received_callback: Callable[[str], None]):
+
+class SerialReceiver(QThread):
+    data_received = pyqtSignal(str)  # 数据接收信号
+
+    def __init__(self, config: SerialConfig, port_index: int):
+        super().__init__()
+        self.config = config
+        self.port_index = port_index
         self.serial_port = None
-        self.is_connected = False
-        self.receive_thread = None
-        self.should_stop = False
-        self.data_received_callback = data_received_callback
+        self._is_connected = False
+        self._should_stop = False
 
-    def get_available_ports(self) -> list[str]:
-        """获取所有可用串口"""
-        return [port.device for port in serial.tools.list_ports.comports()]
-
-    def connect(self, config: SerialConfig) -> bool:
-        """连接串口"""
-        if self.is_connected:
-            return False
-
+    def run(self):
+        """接收数据的线程循环"""
         try:
             self.serial_port = serial.Serial(
-                port=config.port,
-                baudrate=config.baudrate,
-                bytesize=config.bytesize,
-                parity=config.parity,
-                stopbits=config.stopbits,
-                timeout=config.timeout
+                port=self.config.port,
+                baudrate=self.config.baudrate,
+                bytesize=self.config.bytesize,
+                parity=self.config.parity,
+                stopbits=self.config.stopbits,
+                timeout=self.config.timeout
             )
-            self.is_connected = True
-            self.should_stop = False
-            self.receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
-            self.receive_thread.start()
-            return True
-        except Exception as e:
-            print(f"Failed to connect: {e}")
-            return False
+            self._is_connected = True
 
-    def disconnect(self):
-        """断开串口连接"""
-        if not self.is_connected:
-            return
-
-        self.should_stop = True
-        if self.receive_thread and self.receive_thread.is_alive():
-            self.receive_thread.join(timeout=1)
-
-        if self.serial_port and self.serial_port.is_open:
-            self.serial_port.close()
-
-        self.is_connected = False
-
-    def _receive_loop(self):
-        """接收数据的循环"""
-        while not self.should_stop and self.serial_port and self.serial_port.is_open:
-            try:
+            while not self._should_stop and self.serial_port and self.serial_port.is_open:
                 if self.serial_port.in_waiting > 0:
                     data = self.serial_port.read(self.serial_port.in_waiting)
                     try:
                         text_data = data.decode('utf-8', errors='replace')
                     except:
                         text_data = str(data)
-                    self.data_received_callback(text_data)
-            except Exception as e:
-                self.data_received_callback(f"\nReceive error: {e}\n")
-                break
+                    self.data_received.emit(text_data)
+
+        except Exception as e:
+            self.data_received.emit(f"\nReceive error: {e}\n")
+        finally:
+            if self.serial_port and self.serial_port.is_open:
+                self.serial_port.close()
+            self._is_connected = False
+
+    def disconnect(self):
+        """断开串口连接"""
+        self._should_stop = True
+        if self.isRunning():
+            self.wait(1000)  # 等待线程结束，最多1秒
+        self._is_connected = False
+
+    @property
+    def is_connected(self):
+        return self._is_connected
+
+    @staticmethod
+    def get_available_ports() -> list:
+        """获取所有可用串口"""
+        return [port.device for port in serial.tools.list_ports.comports()]
