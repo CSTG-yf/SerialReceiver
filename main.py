@@ -21,22 +21,23 @@ class SerialPortWidget(QGroupBox):
 
     def init_ui(self):
         layout = QVBoxLayout()
-
+        layout.setContentsMargins(8, 8, 8, 8)
         # 配置区域
         config_layout = QHBoxLayout()
+        config_layout.setSpacing(6)
 
         self.port_combo = QComboBox()
-        self.port_combo.setFixedWidth(120)
+        self.port_combo.setFixedWidth(150)
         config_layout.addWidget(self.port_combo)
 
         self.baudrate_combo = QComboBox()
         self.baudrate_combo.addItems(['9600', '19200', '38400', '57600', '115200'])
         self.baudrate_combo.setCurrentText('9600')
-        self.baudrate_combo.setFixedWidth(80)
+        self.baudrate_combo.setFixedWidth(100)
         config_layout.addWidget(self.baudrate_combo)
 
         self.connect_btn = QPushButton("连接")
-        self.connect_btn.setFixedWidth(60)
+        self.connect_btn.setFixedWidth(80)
         self.connect_btn.clicked.connect(self.toggle_connection)
         config_layout.addWidget(self.connect_btn)
 
@@ -57,6 +58,7 @@ class SerialPortWidget(QGroupBox):
 
         # 接收数据显示区域
         self.receive_text = QTextEdit()
+        self.receive_text.setMinimumHeight(200)
         self.receive_text.setReadOnly(True)
         self.receive_text.setLineWrapMode(QTextEdit.NoWrap)
         layout.addWidget(self.receive_text)
@@ -199,7 +201,7 @@ class SerialReceiverApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("多串口数据接收器")
-        self.resize(1000, 700)
+        self.resize(1920, 1080)
 
         # 接收控制变量
         self.is_receiving = True  # 默认接收数据
@@ -226,6 +228,11 @@ class SerialReceiverApp(QMainWindow):
         self.port_count_combo.setCurrentText('8')
         self.port_count_combo.currentTextChanged.connect(self.update_port_displays)
         control_layout.addWidget(self.port_count_combo)
+
+        # 网格布局参数调整
+        self.grid_layout = QGridLayout()
+        self.grid_layout.setSpacing(12)  # 增大间距
+        self.grid_layout.setContentsMargins(10, 10, 10, 10)  # 设置边距
 
         # 接收控制按钮
         self.receive_btn = QPushButton("停止接收")
