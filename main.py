@@ -18,6 +18,7 @@ class SerialPortWidget(QGroupBox):
         self.is_receiving = True  # 默认接收数据
         self.max_display_length = 200000  # 显示区域最大字符数
         self.data_buffer = ""
+        self.is_display_paused = False  # 新增：初始化显示暂停状态
         # 创建UI
         self.init_ui()
 
@@ -77,6 +78,13 @@ class SerialPortWidget(QGroupBox):
         # 控制面板组
         control_group = QGroupBox("控制面板")
         control_layout = QHBoxLayout(control_group)
+
+        # 添加暂停按钮
+        self.pause_btn = QPushButton("暂停显示")
+        self.pause_btn.setCheckable(True)
+        self.pause_btn.clicked.connect(self.toggle_display_pause)
+        control_layout.addWidget(self.pause_btn)
+
         self.clean_btn = QPushButton("清理内存")
         self.clean_btn.clicked.connect(self.manual_cleanup)
         control_layout.addWidget(self.clean_btn)
@@ -113,6 +121,33 @@ class SerialPortWidget(QGroupBox):
         """显示错误信息"""
         self.error_label.setText(message)
         self.error_label.setToolTip(message)  # 添加悬停提示
+
+    def toggle_display_pause(self):
+        """切换显示暂停状态"""
+        self.is_display_paused = not self.is_display_paused  # 切换状态
+
+        if self.is_display_paused:
+            self.pause_btn.setText("继续显示")
+        else:
+            self.pause_btn.setText("暂停显示")
+            # 恢复显示时更新显示内容（从缓冲区）
+            self.update_display()
+
+    def update_display(self, new_data=""):
+        """更新显示内容"""
+        if self.is_display_paused:
+            return
+
+        # 如果提供了新数据，只追加新数据
+        if new_data:
+            cursor = self.receive_text.textCursor()
+            cursor.movePosition(cursor.End)
+            cursor.insertText(new_data)
+        else:
+            # 否则刷新整个显示（从缓冲区）
+            self.receive_text.setPlainText(self.data_buffer)
+
+        self.receive_text.ensureCursorVisible()
 
     def clear_error(self):
         """清除错误信息"""
@@ -219,37 +254,20 @@ class SerialPortWidget(QGroupBox):
         if not self.is_receiving:
             return
 
-            # 1. 追加新数据
+        # 1. 追加新数据到缓冲区
         self.data_buffer += data
 
         # 2. 维护缓冲区大小
         if len(self.data_buffer) > self.max_display_length * 1.2:
-            # 保留最新的数据
             self.data_buffer = self.data_buffer[-self.max_display_length:]
 
+        # 3. 更新显示（如果未暂停）
+        if not self.is_display_paused:
+            self.update_display(data)
+
+        # 4. 更新详情窗口（如果存在）
         if hasattr(self, '_data_window') and self._data_window.isVisible():
-            self._data_window.append_data(data)
-
-        # 3. 高效更新显示
-        if len(self.data_buffer) > self.max_display_length:
-            # 只更新新增部分（性能优化）
-            new_data = self.data_buffer[-len(data):]
-            cursor = self.receive_text.textCursor()
-            cursor.movePosition(cursor.End)
-            cursor.insertText(new_data)
-
-            # 必要时裁剪开头部分
-            if len(self.receive_text.toPlainText()) > self.max_display_length:
-                self.receive_text.setPlainText(
-                    self.receive_text.toPlainText()[-self.max_display_length:]
-                )
-        else:
-            # 常规追加
-            cursor = self.receive_text.textCursor()
-            cursor.movePosition(cursor.End)
-            cursor.insertText(data)
-
-        self.receive_text.ensureCursorVisible()
+            self._data_window.append_data(data, self.is_display_paused)
 
     def clear_receive(self):
         """清空接收区"""
@@ -280,7 +298,6 @@ class PortDataWindow(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle(f"串口数据 - {port_name}")
         self.resize(800, 600)
-
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
@@ -292,8 +309,9 @@ class PortDataWindow(QMainWindow):
         self.data_text.setLineWrapMode(QTextEdit.NoWrap)
         layout.addWidget(self.data_text)
 
-        # 控制按钮
+        # 控制按钮（已移除暂停按钮）
         btn_layout = QHBoxLayout()
+
         self.clear_btn = QPushButton("清空")
         self.clear_btn.clicked.connect(self.clear_data)
         btn_layout.addWidget(self.clear_btn)
@@ -311,12 +329,13 @@ class PortDataWindow(QMainWindow):
             self.data_text.verticalScrollBar().maximum()
         )
 
-    def append_data(self, data: str):
+    def append_data(self, data: str, is_parent_paused=False):
         """追加新数据"""
-        cursor = self.data_text.textCursor()
-        cursor.movePosition(cursor.End)
-        cursor.insertText(data)
-        self.data_text.ensureCursorVisible()
+        if not is_parent_paused:  # 只根据父窗口的暂停状态决定是否更新
+            cursor = self.data_text.textCursor()
+            cursor.movePosition(cursor.End)
+            cursor.insertText(data)
+            self.data_text.ensureCursorVisible()
 
     def clear_data(self):
         """清空数据"""
