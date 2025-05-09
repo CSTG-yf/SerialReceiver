@@ -39,14 +39,24 @@ class SerialReceiver(QThread):
             )
             self._is_connected = True
 
+            # 优化读取参数
+            read_chunk_size = 1024  # 每次读取1KB
+            max_read_per_loop = 8192  # 每次循环最多读取8KB
+
             while not self._should_stop and self.serial_port and self.serial_port.is_open:
                 try:
-                    if self.serial_port.in_waiting > 0:
-                        data = self.serial_port.read(self.serial_port.in_waiting)
+                    bytes_available = self.serial_port.in_waiting
+                    if bytes_available > 0:
+                        # 限制单次读取量
+                        bytes_to_read = min(bytes_available, max_read_per_loop, read_chunk_size)
+                        data = self.serial_port.read(bytes_to_read)
+
+                        # 高效解码
                         try:
                             text_data = data.decode('utf-8', errors='replace')
-                        except:
-                            text_data = str(data)
+                        except UnicodeDecodeError:
+                            text_data = data.decode('latin1')  # 更宽松的解码方式
+
                         self.data_received.emit(text_data)
                 except serial.SerialException as e:
                     self.error_occurred.emit(f"串口读取错误: {str(e)}")
@@ -72,6 +82,8 @@ class SerialReceiver(QThread):
         if self.isRunning():
             self.wait(1000)  # 等待线程结束，最多1秒
         self._is_connected = False
+        if hasattr(self, '_data_window'):
+            self._data_window.close()
 
     @property
     def is_connected(self):
@@ -81,3 +93,19 @@ class SerialReceiver(QThread):
     def get_available_ports() -> list:
         """获取所有可用串口"""
         return [port.device for port in serial.tools.list_ports.comports()]
+
+    def get_port_info(self):
+        """获取串口详细信息"""
+        if not self.serial_port or not self.serial_port.is_open:
+            return "串口未连接"
+
+        info = f"""
+        端口: {self.serial_port.port}
+        波特率: {self.serial_port.baudrate}
+        数据位: {self.serial_port.bytesize}
+        校验位: {self.serial_port.parity}
+        停止位: {self.serial_port.stopbits}
+        超时: {self.serial_port.timeout}
+        接收缓存: {self.serial_port.in_waiting} 字节
+        """
+        return info

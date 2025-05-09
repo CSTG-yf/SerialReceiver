@@ -2,7 +2,7 @@ import serial
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QComboBox, QPushButton, QTextEdit, QGroupBox, QScrollArea, QFileDialog,
                              QMessageBox, QFrame, QGridLayout, QSizePolicy)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal,QTimer
 from PyQt5.QtGui import QColor
 from serial_receiver import SerialReceiver, SerialConfig
 import sys
@@ -16,7 +16,8 @@ class SerialPortWidget(QGroupBox):
         self.port_index = port_index
         self.serial_receiver = None
         self.is_receiving = True  # 默认接收数据
-
+        self.max_display_length = 200000  # 显示区域最大字符数
+        self.data_buffer = ""
         # 创建UI
         self.init_ui()
 
@@ -42,6 +43,12 @@ class SerialPortWidget(QGroupBox):
         self.connect_btn.clicked.connect(self.toggle_connection)
         config_layout.addWidget(self.connect_btn)
 
+        self.details_btn = QPushButton("显示详情")
+        self.details_btn.setFixedWidth(80)
+        self.details_btn.setEnabled(False)  # 初始不可用
+        self.details_btn.clicked.connect(self.show_port_details)
+        config_layout.addWidget(self.details_btn)
+
         # 错误信息显示标签
         self.error_label = QLabel()
         self.error_label.setStyleSheet("""
@@ -59,13 +66,20 @@ class SerialPortWidget(QGroupBox):
 
         # 接收数据显示区域
         self.receive_text = QTextEdit()
-        self.receive_text.setMinimumHeight(200)
+        self.receive_text.setMinimumHeight(300)  # 增加最小高度
+        self.receive_text.setMinimumWidth(400)  # 增加最小宽度
         self.receive_text.setReadOnly(True)
         self.receive_text.setLineWrapMode(QTextEdit.NoWrap)
         layout.addWidget(self.receive_text)
-
         # 底部按钮区域
         btn_layout = QHBoxLayout()
+
+        # 控制面板组
+        control_group = QGroupBox("控制面板")
+        control_layout = QHBoxLayout(control_group)
+        self.clean_btn = QPushButton("清理内存")
+        self.clean_btn.clicked.connect(self.manual_cleanup)
+        control_layout.addWidget(self.clean_btn)
 
         self.clear_btn = QPushButton("清空")
         self.clear_btn.setFixedWidth(60)
@@ -79,6 +93,8 @@ class SerialPortWidget(QGroupBox):
         self.save_btn.clicked.connect(self.save_data)
         btn_layout.addWidget(self.save_btn)
 
+        # 将控制面板组添加到主布局
+        layout.addWidget(control_group)
         layout.addLayout(btn_layout)
 
         self.setLayout(layout)
@@ -110,9 +126,26 @@ class SerialPortWidget(QGroupBox):
         else:
             self.connect_serial()
 
+    def show_port_details(self):
+        """显示串口数据详情窗口"""
+        if not self.serial_receiver or not self.serial_receiver.is_connected:
+            return
+
+        port_name = self.serial_receiver.config.port
+        if not hasattr(self, '_data_window'):
+            self._data_window = PortDataWindow(port_name, self)
+            self._data_window.set_data(self.data_buffer)  # 传递当前数据
+
+        # 更新窗口标题和数据
+        self._data_window.setWindowTitle(f"串口数据 - {port_name}")
+        self._data_window.set_data(self.data_buffer)
+        self._data_window.show()
+        self._data_window.raise_()  # 将窗口置于最前
+
     def connect_serial(self):
         """连接串口"""
         port = self.port_combo.currentText()
+        self.details_btn.setEnabled(True)
         if not port:
             self.show_error("请选择串口号")
             return
@@ -150,6 +183,21 @@ class SerialPortWidget(QGroupBox):
         except Exception as e:
             self.show_error(f"未知错误: {str(e)}")
 
+    def manual_cleanup(self):
+        """手动清理内存"""
+        """手动清理内存"""
+        # 清理当前控件的缓冲区但保留最后10000字符
+        if len(self.data_buffer) > 10000:
+            self.data_buffer = self.data_buffer[-10000:]
+            self.receive_text.setPlainText(self.data_buffer)
+
+        # 强制垃圾回收
+        import gc
+        gc.collect()
+
+        QMessageBox.information(self, "清理完成", "已释放内存资源")
+
+
     def on_serial_error(self, error_msg: str):
         """处理串口错误信号"""
         self.show_error(error_msg)
@@ -163,6 +211,7 @@ class SerialPortWidget(QGroupBox):
 
         self.connect_btn.setText("连接")
         self.port_combo.setEnabled(True)
+        self.details_btn.setEnabled(False)
         self.baudrate_combo.setEnabled(True)
 
     def on_data_received(self, data: str):
@@ -170,10 +219,36 @@ class SerialPortWidget(QGroupBox):
         if not self.is_receiving:
             return
 
-        cursor = self.receive_text.textCursor()
-        cursor.movePosition(cursor.End)
-        cursor.insertText(data)
-        self.receive_text.setTextCursor(cursor)
+            # 1. 追加新数据
+        self.data_buffer += data
+
+        # 2. 维护缓冲区大小
+        if len(self.data_buffer) > self.max_display_length * 1.2:
+            # 保留最新的数据
+            self.data_buffer = self.data_buffer[-self.max_display_length:]
+
+        if hasattr(self, '_data_window') and self._data_window.isVisible():
+            self._data_window.append_data(data)
+
+        # 3. 高效更新显示
+        if len(self.data_buffer) > self.max_display_length:
+            # 只更新新增部分（性能优化）
+            new_data = self.data_buffer[-len(data):]
+            cursor = self.receive_text.textCursor()
+            cursor.movePosition(cursor.End)
+            cursor.insertText(new_data)
+
+            # 必要时裁剪开头部分
+            if len(self.receive_text.toPlainText()) > self.max_display_length:
+                self.receive_text.setPlainText(
+                    self.receive_text.toPlainText()[-self.max_display_length:]
+                )
+        else:
+            # 常规追加
+            cursor = self.receive_text.textCursor()
+            cursor.movePosition(cursor.End)
+            cursor.insertText(data)
+
         self.receive_text.ensureCursorVisible()
 
     def clear_receive(self):
@@ -197,6 +272,72 @@ class SerialPortWidget(QGroupBox):
             except Exception as e:
                 self.show_error(f"保存失败: {str(e)}")
 
+
+class PortDataWindow(QMainWindow):
+    """串口数据详情窗口"""
+
+    def __init__(self, port_name: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"串口数据 - {port_name}")
+        self.resize(800, 600)
+
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+
+        layout = QVBoxLayout(central_widget)
+
+        # 数据展示区域
+        self.data_text = QTextEdit()
+        self.data_text.setReadOnly(True)
+        self.data_text.setLineWrapMode(QTextEdit.NoWrap)
+        layout.addWidget(self.data_text)
+
+        # 控制按钮
+        btn_layout = QHBoxLayout()
+        self.clear_btn = QPushButton("清空")
+        self.clear_btn.clicked.connect(self.clear_data)
+        btn_layout.addWidget(self.clear_btn)
+
+        self.save_btn = QPushButton("保存")
+        self.save_btn.clicked.connect(self.save_data)
+        btn_layout.addWidget(self.save_btn)
+
+        layout.addLayout(btn_layout)
+
+    def set_data(self, data: str):
+        """设置初始数据"""
+        self.data_text.setPlainText(data)
+        self.data_text.verticalScrollBar().setValue(
+            self.data_text.verticalScrollBar().maximum()
+        )
+
+    def append_data(self, data: str):
+        """追加新数据"""
+        cursor = self.data_text.textCursor()
+        cursor.movePosition(cursor.End)
+        cursor.insertText(data)
+        self.data_text.ensureCursorVisible()
+
+    def clear_data(self):
+        """清空数据"""
+        self.data_text.clear()
+
+    def save_data(self):
+        """保存数据到文件"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "保存串口数据",
+            "",
+            "Text Files (*.txt);;All Files (*)"
+        )
+
+        if file_path:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(self.data_text.toPlainText())
+                QMessageBox.information(self, "成功", "数据保存成功")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"保存失败: {str(e)}")
 
 class SerialReceiverApp(QMainWindow):
     def __init__(self):
