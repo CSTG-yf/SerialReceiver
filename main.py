@@ -220,7 +220,6 @@ class SerialPortWidget(QGroupBox):
 
     def manual_cleanup(self):
         """手动清理内存"""
-        """手动清理内存"""
         # 清理当前控件的缓冲区但保留最后10000字符
         if len(self.data_buffer) > 10000:
             self.data_buffer = self.data_buffer[-10000:]
@@ -436,32 +435,66 @@ class SerialReceiverApp(QMainWindow):
 
     def create_port_widgets(self, count: int):
         """创建指定数量的串口控件"""
-        # 先清除现有控件
+        # 保存当前已连接的串口配置
+        connected_ports = []
         for widget in self.port_widgets:
-            widget.disconnect_serial()
-            widget.setParent(None)
+            if widget.serial_receiver and widget.serial_receiver.is_connected:
+                connected_ports.append({
+                    'index': widget.port_index,
+                    'port': widget.serial_receiver.config.port,
+                    'baudrate': widget.serial_receiver.config.baudrate
+                })
 
-        self.port_widgets.clear()
+        # 清除所有控件
+        for widget in self.port_widgets:
+            # 只断开未标记为保留的串口
+            if not (widget.serial_receiver and widget.serial_receiver.is_connected):
+                widget.disconnect_serial()
+                widget.setParent(None)
+
+        # 保留已连接的控件
+        self.port_widgets = [w for w in self.port_widgets
+                             if w.serial_receiver and w.serial_receiver.is_connected]
 
         # 创建新的控件
-        for i in range(count):
+        current_count = len(self.port_widgets)
+        for i in range(current_count, count):
             port_widget = SerialPortWidget(i)
             self.port_widgets.append(port_widget)
 
-            # 添加到网格布局
-            row = i // 4
-            col = i % 4
-            self.grid_layout.addWidget(port_widget, row, col)
+        # 重新布局所有控件
+        self.update_port_layout()
+
+        # 恢复已连接的串口
+        for conn in connected_ports:
+            if conn['index'] < len(self.port_widgets):
+                widget = self.port_widgets[conn['index']]
+                widget.port_combo.setCurrentText(conn['port'])
+                widget.baudrate_combo.setCurrentText(str(conn['baudrate']))
+                widget.connect_serial()
 
         # 刷新端口列表
         self.refresh_all_ports()
+
+    def update_port_layout(self):
+        """更新串口控件的布局"""
+        # 清除网格布局中的所有项目
+        for i in reversed(range(self.grid_layout.count())):
+            self.grid_layout.itemAt(i).widget().setParent(None)
+
+        # 重新添加所有控件到网格布局
+        for i, widget in enumerate(self.port_widgets):
+            row = i // 4
+            col = i % 4
+            self.grid_layout.addWidget(widget, row, col)
 
     def update_port_displays(self, count_str: str):
         """更新串口显示区域"""
         try:
             count = int(count_str)
-            self.max_ports = count
-            self.create_port_widgets(count)
+            if count != len(self.port_widgets):
+                self.max_ports = count
+                self.create_port_widgets(count)
         except ValueError:
             pass
 
