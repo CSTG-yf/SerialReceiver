@@ -1,7 +1,7 @@
 import serial
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QComboBox, QPushButton, QTextEdit, QGroupBox, QScrollArea, QFileDialog,
-                             QMessageBox, QFrame, QGridLayout, QSizePolicy)
+                             QMessageBox, QFrame, QGridLayout, QSizePolicy, QCheckBox)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal,QTimer
 from PyQt5.QtGui import QColor
 from serial_receiver import SerialReceiver, SerialConfig
@@ -19,6 +19,19 @@ class SerialPortWidget(QGroupBox):
         self.max_display_length = 200000  # 显示区域最大字符数
         self.data_buffer = ""
         self.is_display_paused = False  # 新增：初始化显示暂停状态
+        # 文件保存相关属性
+        self.log_dir = "serial_logs"  # 日志目录
+        self.current_log_file = None  # 当前日志文件
+        self.max_file_size = 500 * 1024 * 1024  # 500MB
+        self.auto_save_enabled = True  # 默认启用自动保存
+        self.bytes_written = 0  # 已写入字节数
+
+        # 创建日志目录
+        import os
+        os.makedirs(self.log_dir, exist_ok=True)
+
+        # 初始化日志文件
+        self.create_new_log_file()
         # 创建UI
         self.init_ui()
 
@@ -79,6 +92,12 @@ class SerialPortWidget(QGroupBox):
         control_group = QGroupBox("控制面板")
         control_layout = QHBoxLayout(control_group)
 
+        # 在控制面板中添加自动保存开关
+        self.auto_save_check = QCheckBox("自动保存")
+        self.auto_save_check.setChecked(True)
+        self.auto_save_check.stateChanged.connect(self.toggle_auto_save)
+        control_layout.addWidget(self.auto_save_check)
+
         # 添加暂停按钮
         self.pause_btn = QPushButton("暂停显示")
         self.pause_btn.setCheckable(True)
@@ -106,6 +125,63 @@ class SerialPortWidget(QGroupBox):
         layout.addLayout(btn_layout)
 
         self.setLayout(layout)
+
+    def toggle_auto_save(self, state):
+        """切换自动保存状态"""
+        self.auto_save_enabled = (state == Qt.Checked)
+        if self.auto_save_enabled and not self.current_log_file:
+            self.create_new_log_file()
+
+    def create_new_log_file(self):
+        """创建新的日志文件"""
+        from datetime import datetime
+        if self.current_log_file and not self.current_log_file.closed:
+            self.current_log_file.close()
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{self.log_dir}/serial_{self.port_index + 1}_{timestamp}.log"
+        self.current_log_file = open(filename, 'a', encoding='utf-8')
+        self.bytes_written = 0
+        print(f"创建新的日志文件: {filename}")  # 调试信息
+
+    def on_data_received(self, data: str):
+        """数据接收回调"""
+        if not self.is_receiving:
+            return
+
+        # 1. 写入文件
+        if self.auto_save_enabled and self.current_log_file:
+            try:
+                self.current_log_file.write(data)
+                self.current_log_file.flush()  # 确保数据写入磁盘
+                self.bytes_written += len(data.encode('utf-8'))
+
+                # 检查文件大小，超过限制则创建新文件
+                if self.bytes_written >= self.max_file_size:
+                    self.create_new_log_file()
+            except IOError as e:
+                self.show_error(f"日志写入失败: {str(e)}")
+
+        # 2. 追加新数据到显示缓冲区
+        self.data_buffer += data
+
+        # 3. 维护显示缓冲区大小
+        if len(self.data_buffer) > self.max_display_length * 1.2:
+            self.data_buffer = self.data_buffer[-self.max_display_length:]
+
+        # 4. 更新显示（如果未暂停）
+        if not self.is_display_paused:
+            self.update_display(data)
+
+        # 5. 更新详情窗口（如果存在）
+        if hasattr(self, '_data_window') and self._data_window.isVisible():
+            self._data_window.append_data(data, self.is_display_paused)
+
+    def closeEvent(self, event):
+        """清理资源"""
+        if self.current_log_file and not self.current_log_file.closed:
+            self.current_log_file.close()
+        super().closeEvent(event)
 
     def refresh_ports(self, ports: list):
         """刷新端口列表"""
@@ -240,13 +316,24 @@ class SerialPortWidget(QGroupBox):
     def disconnect_serial(self):
         """断开串口连接"""
         if self.serial_receiver:
+            # 先停止数据接收
             self.serial_receiver.disconnect()
+
+            # 执行彻底清理
+            self.serial_receiver.cleanup()
+
+            # 删除对象
+            del self.serial_receiver
             self.serial_receiver = None
 
         self.connect_btn.setText("连接")
         self.port_combo.setEnabled(True)
         self.details_btn.setEnabled(False)
         self.baudrate_combo.setEnabled(True)
+
+        # 强制垃圾回收
+        import gc
+        gc.collect()
 
     def on_data_received(self, data: str):
         """数据接收回调"""
@@ -409,6 +496,11 @@ class SerialReceiverApp(QMainWindow):
         self.refresh_btn.clicked.connect(self.refresh_all_ports)
         control_layout.addWidget(self.refresh_btn)
 
+        self.global_auto_save_check = QCheckBox("全局自动保存")
+        self.global_auto_save_check.setChecked(True)
+        self.global_auto_save_check.stateChanged.connect(self.toggle_global_auto_save)
+        control_layout.addWidget(self.global_auto_save_check)
+
         control_layout.addStretch()
         main_layout.addWidget(control_group)
 
@@ -432,6 +524,14 @@ class SerialReceiverApp(QMainWindow):
 
         # 初始化串口显示区域
         self.create_port_widgets(8)
+
+    def toggle_global_auto_save(self, state):
+        """切换所有串口的自动保存状态"""
+        enabled = (state == Qt.Checked)
+        for widget in self.port_widgets:
+            widget.auto_save_enabled = enabled
+            if hasattr(widget, 'auto_save_check'):
+                widget.auto_save_check.setChecked(enabled)
 
     def create_port_widgets(self, count: int):
         """创建指定数量的串口控件"""

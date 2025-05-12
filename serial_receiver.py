@@ -1,7 +1,9 @@
 import serial
 import serial.tools.list_ports
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from dataclasses import dataclass
+
+from PyQt5.QtWidgets import QCheckBox, QGroupBox, QHBoxLayout
 
 
 @dataclass
@@ -42,9 +44,14 @@ class SerialReceiver(QThread):
             # 优化读取参数
             read_chunk_size = 1024  # 每次读取1KB
             max_read_per_loop = 8192  # 每次循环最多读取8KB
+            error_count = 0  # 错误计数器
+            max_error_count = 5  # 最大允许错误次数
 
             while not self._should_stop and self.serial_port and self.serial_port.is_open:
                 try:
+                    # 增加短暂延迟，减少资源占用
+                    self.msleep(10)
+
                     bytes_available = self.serial_port.in_waiting
                     if bytes_available > 0:
                         # 限制单次读取量
@@ -58,9 +65,30 @@ class SerialReceiver(QThread):
                             text_data = data.decode('latin1')  # 更宽松的解码方式
 
                         self.data_received.emit(text_data)
+                        error_count = 0  # 重置错误计数器
+                    else:
+                        # 没有数据时短暂休眠
+                        self.msleep(50)
+
                 except serial.SerialException as e:
-                    self.error_occurred.emit(f"串口读取错误: {str(e)}")
-                    break
+                    error_count += 1
+                    if error_count >= max_error_count:
+                        self.error_occurred.emit(f"串口读取错误: {str(e)} (连续错误{error_count}次)")
+                        break
+                    # 短暂延迟后重试
+                    self.msleep(100)
+
+                except OSError as e:
+                    # 处理系统资源错误
+                    if e.errno == 22:  # 系统资源不足
+                        self.error_occurred.emit("系统资源不足，正在尝试恢复...")
+                        self.msleep(500)  # 等待系统恢复
+                        error_count += 1
+                        if error_count >= max_error_count:
+                            break
+                    else:
+                        self.error_occurred.emit(f"系统错误: {str(e)}")
+                        break
 
         except serial.SerialException as e:
             error_msg = f"串口连接错误: {str(e)}"
@@ -75,6 +103,24 @@ class SerialReceiver(QThread):
             if self.serial_port and self.serial_port.is_open:
                 self.serial_port.close()
             self._is_connected = False
+
+    def cleanup(self):
+        """彻底清理串口资源"""
+        self._should_stop = True
+        if self.isRunning():
+            self.wait(2000)  # 等待更长时间确保线程结束
+
+        if self.serial_port:
+            try:
+                self.serial_port.close()
+            except:
+                pass
+            finally:
+                self.serial_port = None
+
+        # 强制释放资源
+        import gc
+        gc.collect()
 
     def disconnect(self):
         """断开串口连接"""
