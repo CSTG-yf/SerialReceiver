@@ -23,15 +23,14 @@ class SerialPortWidget(QGroupBox):
         self.log_dir = "serial_logs"  # 日志目录
         self.current_log_file = None  # 当前日志文件
         self.max_file_size = 500 * 1024 * 1024  # 500MB
-        self.auto_save_enabled = True  # 默认启用自动保存
+        self.auto_save_enabled = False  # 默认不启用自动保存
         self.bytes_written = 0  # 已写入字节数
 
         # 创建日志目录
         import os
         os.makedirs(self.log_dir, exist_ok=True)
 
-        # 初始化日志文件
-        self.create_new_log_file()
+        # 移除初始化日志文件的调用
         # 创建UI
         self.init_ui()
 
@@ -129,8 +128,8 @@ class SerialPortWidget(QGroupBox):
     def toggle_auto_save(self, state):
         """切换自动保存状态"""
         self.auto_save_enabled = (state == Qt.Checked)
-        if self.auto_save_enabled and not self.current_log_file:
-            self.create_new_log_file()
+        # 移除在没有端口名的情况下创建日志文件的逻辑
+        # 日志文件将在连接串口时创建
 
     def create_new_log_file(self):
         """创建新的日志文件"""
@@ -149,8 +148,9 @@ class SerialPortWidget(QGroupBox):
         if not self.is_receiving:
             return
 
-        # 1. 写入文件
-        if self.auto_save_enabled and self.current_log_file:
+        # 1. 写入文件（仅在连接时且自动保存启用时）
+        if (self.auto_save_enabled and self.current_log_file
+                and self.serial_receiver and self.serial_receiver.is_connected):
             try:
                 self.current_log_file.write(data)
                 self.current_log_file.flush()  # 确保数据写入磁盘
@@ -158,7 +158,8 @@ class SerialPortWidget(QGroupBox):
 
                 # 检查文件大小，超过限制则创建新文件
                 if self.bytes_written >= self.max_file_size:
-                    self.create_new_log_file()
+                    port_name = self.serial_receiver.config.port
+                    self.create_new_log_file(port_name)
             except IOError as e:
                 self.show_error(f"日志写入失败: {str(e)}")
 
@@ -272,6 +273,10 @@ class SerialPortWidget(QGroupBox):
             if self.serial_receiver:
                 self.serial_receiver.disconnect()
 
+            # 创建新的日志文件（仅在连接时创建）
+            if self.auto_save_enabled:
+                self.create_new_log_file(port)  # 传入端口名称
+
             # 创建新的接收器
             self.serial_receiver = SerialReceiver(config, self.port_index)
             self.serial_receiver.data_received.connect(self.on_data_received)
@@ -293,6 +298,34 @@ class SerialPortWidget(QGroupBox):
             self.show_error(f"无效参数: {str(e)}")
         except Exception as e:
             self.show_error(f"未知错误: {str(e)}")
+
+    def create_new_log_file(self, port_name: str):
+        """创建新的日志文件
+        Args:
+            port_name: 串口名称，如 'COM1' 或 '/dev/ttyUSB0'
+        """
+        from datetime import datetime
+        import os
+
+        # 关闭现有文件
+        if self.current_log_file and not self.current_log_file.closed:
+            self.current_log_file.close()
+
+        # 清理端口名称中的特殊字符
+        clean_port_name = port_name.replace('/', '_').replace('\\', '_').replace(':', '')
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # 确保日志目录存在
+        os.makedirs(self.log_dir, exist_ok=True)
+
+        # 创建新文件
+        filename = f"{self.log_dir}/{clean_port_name}_{timestamp}.log"
+        try:
+            self.current_log_file = open(filename, 'a', encoding='utf-8')
+            self.bytes_written = 0
+            print(f"创建新的日志文件: {filename}")
+        except IOError as e:
+            self.show_error(f"无法创建日志文件: {str(e)}")
 
     def manual_cleanup(self):
         """手动清理内存"""
@@ -319,6 +352,11 @@ class SerialPortWidget(QGroupBox):
             # 先停止数据接收
             self.serial_receiver.disconnect()
 
+            # 关闭日志文件
+            if self.current_log_file and not self.current_log_file.closed:
+                self.current_log_file.close()
+                self.current_log_file = None
+
             # 执行彻底清理
             self.serial_receiver.cleanup()
 
@@ -340,18 +378,33 @@ class SerialPortWidget(QGroupBox):
         if not self.is_receiving:
             return
 
-        # 1. 追加新数据到缓冲区
+        # 1. 仅在连接状态且自动保存启用时写入文件
+        if (self.auto_save_enabled and self.current_log_file
+                and self.serial_receiver and self.serial_receiver.is_connected):
+            try:
+                self.current_log_file.write(data)
+                self.current_log_file.flush()  # 确保数据写入磁盘
+                self.bytes_written += len(data.encode('utf-8'))
+
+                # 检查文件大小，超过限制则创建新文件
+                if self.bytes_written >= self.max_file_size:
+                    port_name = self.serial_receiver.config.port
+                    self.create_new_log_file(port_name)
+            except IOError as e:
+                self.show_error(f"日志写入失败: {str(e)}")
+
+        # 2. 追加新数据到显示缓冲区
         self.data_buffer += data
 
-        # 2. 维护缓冲区大小
+        # 3. 维护显示缓冲区大小
         if len(self.data_buffer) > self.max_display_length * 1.2:
             self.data_buffer = self.data_buffer[-self.max_display_length:]
 
-        # 3. 更新显示（如果未暂停）
+        # 4. 更新显示（如果未暂停）
         if not self.is_display_paused:
             self.update_display(data)
 
-        # 4. 更新详情窗口（如果存在）
+        # 5. 更新详情窗口（如果存在）
         if hasattr(self, '_data_window') and self._data_window.isVisible():
             self._data_window.append_data(data, self.is_display_paused)
 
