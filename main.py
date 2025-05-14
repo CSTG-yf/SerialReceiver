@@ -25,6 +25,7 @@ class SerialPortWidget(QGroupBox):
         self.max_file_size = 500 * 1024 * 1024  # 500MB
         self.auto_save_enabled = False  # 默认不启用自动保存
         self.bytes_written = 0  # 已写入字节数
+        self.parsed_data_buffer = ""  # 新增：用于存储解析后的数据
 
         # 创建日志目录
         import os
@@ -144,7 +145,7 @@ class SerialPortWidget(QGroupBox):
         print(f"创建新的日志文件: {filename}")  # 调试信息
 
     def on_data_received(self, data: str):
-        """数据接收回调"""
+        """数据接收回调，只处理GNRMC和GNGGA"""
         if not self.is_receiving:
             return
 
@@ -153,10 +154,9 @@ class SerialPortWidget(QGroupBox):
                 and self.serial_receiver and self.serial_receiver.is_connected):
             try:
                 self.current_log_file.write(data)
-                self.current_log_file.flush()  # 确保数据写入磁盘
+                self.current_log_file.flush()
                 self.bytes_written += len(data.encode('utf-8'))
 
-                # 检查文件大小，超过限制则创建新文件
                 if self.bytes_written >= self.max_file_size:
                     port_name = self.serial_receiver.config.port
                     self.create_new_log_file(port_name)
@@ -166,13 +166,20 @@ class SerialPortWidget(QGroupBox):
         # 2. 追加新数据到显示缓冲区
         self.data_buffer += data
 
-        # 3. 维护显示缓冲区大小
-        if len(self.data_buffer) > self.max_display_length * 1.2:
-            self.data_buffer = self.data_buffer[-self.max_display_length:]
+        # 3. 解析数据（只处理GNRMC和GNGGA）
+        self.data_buffer += data
+
+        parsed_data = self.serial_receiver.parse_nmea_data(data)
+        if parsed_data:
+            self.parsed_data_buffer += parsed_data
+
+            if len(self.parsed_data_buffer) > self.max_display_length * 1.2:
+                self.parsed_data_buffer = self.parsed_data_buffer[-self.max_display_length:]
+
 
         # 4. 更新显示（如果未暂停）
         if not self.is_display_paused:
-            self.update_display(data)
+            self.update_display(parsed_data if parsed_data else "")
 
         # 5. 更新详情窗口（如果存在）
         if hasattr(self, '_data_window') and self._data_window.isVisible():
@@ -188,11 +195,40 @@ class SerialPortWidget(QGroupBox):
         """刷新端口列表"""
         current = self.port_combo.currentText()
         self.port_combo.clear()
+
+        # 添加一个空选项作为默认值
+        self.port_combo.addItem("")
         self.port_combo.addItems(ports)
+
+        # 恢复之前的选择（如果仍然可用）
         if current in ports:
             self.port_combo.setCurrentText(current)
         elif ports:
-            self.port_combo.setCurrentIndex(0)
+            self.port_combo.setCurrentIndex(1)  # 跳过空选项
+        else:
+            self.port_combo.setCurrentIndex(0)  # 选择空选项
+
+    def refresh_all_ports(self):
+        """刷新所有串口下拉列表"""
+        try:
+            # 直接获取最新端口列表
+            ports = SerialReceiver.get_available_ports()
+
+            # 更新所有控件
+            for widget in self.port_widgets:
+                widget.refresh_ports(ports)
+                widget.clear_error()  # 刷新时清除错误信息
+
+            # 检查已连接端口是否仍然可用
+            for widget in self.port_widgets:
+                if (widget.serial_receiver and widget.serial_receiver.is_connected and
+                        widget.serial_receiver.config.port not in ports):
+                    # 端口已断开
+                    widget.disconnect_serial()
+                    widget.show_error("串口已断开")
+
+        except Exception as e:
+            QMessageBox.warning(self, "刷新错误", f"刷新串口列表失败: {str(e)}")
 
     def show_error(self, message: str):
         """显示错误信息"""
@@ -211,7 +247,7 @@ class SerialPortWidget(QGroupBox):
             self.update_display()
 
     def update_display(self, new_data=""):
-        """更新显示内容"""
+        """更新显示内容，保留空白行"""
         if self.is_display_paused:
             return
 
@@ -222,8 +258,9 @@ class SerialPortWidget(QGroupBox):
             cursor.insertText(new_data)
         else:
             # 否则刷新整个显示（从缓冲区）
-            self.receive_text.setPlainText(self.data_buffer)
+            self.receive_text.setPlainText(self.parsed_data_buffer)
 
+        # 自动滚动到底部
         self.receive_text.ensureCursorVisible()
 
     def clear_error(self):
@@ -373,44 +410,13 @@ class SerialPortWidget(QGroupBox):
         import gc
         gc.collect()
 
-    def on_data_received(self, data: str):
-        """数据接收回调"""
-        if not self.is_receiving:
-            return
 
-        # 1. 仅在连接状态且自动保存启用时写入文件
-        if (self.auto_save_enabled and self.current_log_file
-                and self.serial_receiver and self.serial_receiver.is_connected):
-            try:
-                self.current_log_file.write(data)
-                self.current_log_file.flush()  # 确保数据写入磁盘
-                self.bytes_written += len(data.encode('utf-8'))
-
-                # 检查文件大小，超过限制则创建新文件
-                if self.bytes_written >= self.max_file_size:
-                    port_name = self.serial_receiver.config.port
-                    self.create_new_log_file(port_name)
-            except IOError as e:
-                self.show_error(f"日志写入失败: {str(e)}")
-
-        # 2. 追加新数据到显示缓冲区
-        self.data_buffer += data
-
-        # 3. 维护显示缓冲区大小
-        if len(self.data_buffer) > self.max_display_length * 1.2:
-            self.data_buffer = self.data_buffer[-self.max_display_length:]
-
-        # 4. 更新显示（如果未暂停）
-        if not self.is_display_paused:
-            self.update_display(data)
-
-        # 5. 更新详情窗口（如果存在）
-        if hasattr(self, '_data_window') and self._data_window.isVisible():
-            self._data_window.append_data(data, self.is_display_paused)
 
     def clear_receive(self):
         """清空接收区"""
         self.receive_text.clear()
+        self.parsed_data_buffer = ""
+        self.data_buffer = ""
 
     def save_data(self):
         """保存数据到文件"""
