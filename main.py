@@ -85,52 +85,48 @@ class SerialPortWidget(QGroupBox):
         self.receive_text.setReadOnly(True)
         self.receive_text.setLineWrapMode(QTextEdit.NoWrap)
         layout.addWidget(self.receive_text)
-        # 底部按钮区域
-        btn_layout = QHBoxLayout()
 
         # 控制面板组
         control_group = QGroupBox("控制面板")
         control_layout = QHBoxLayout(control_group)
 
-        # 在控制面板中添加自动保存开关
+        # 自动保存开关
         self.auto_save_check = QCheckBox("自动保存")
-        self.auto_save_check.setChecked(True)
+        self.auto_save_check.setChecked(False)
         self.auto_save_check.stateChanged.connect(self.toggle_auto_save)
         control_layout.addWidget(self.auto_save_check)
 
-        # 添加暂停按钮
+        # 清空按钮
+        self.clear_btn = QPushButton("清空")
+        self.clear_btn.setFixedWidth(60)
+        self.clear_btn.clicked.connect(self.clear_receive)
+        control_layout.addWidget(self.clear_btn)
+
+        # 暂停按钮
         self.pause_btn = QPushButton("暂停显示")
         self.pause_btn.setCheckable(True)
         self.pause_btn.clicked.connect(self.toggle_display_pause)
         control_layout.addWidget(self.pause_btn)
 
+        # 清理内存按钮
         self.clean_btn = QPushButton("清理内存")
         self.clean_btn.clicked.connect(self.manual_cleanup)
         control_layout.addWidget(self.clean_btn)
 
-        self.clear_btn = QPushButton("清空")
-        self.clear_btn.setFixedWidth(60)
-        self.clear_btn.clicked.connect(self.clear_receive)
-        btn_layout.addWidget(self.clear_btn)
-
-        btn_layout.addStretch()
-
-        self.save_btn = QPushButton("保存")
-        self.save_btn.setFixedWidth(60)
-        self.save_btn.clicked.connect(self.save_data)
-        btn_layout.addWidget(self.save_btn)
-
-        # 将控制面板组添加到主布局
+        control_layout.addStretch()
         layout.addWidget(control_group)
-        layout.addLayout(btn_layout)
-
         self.setLayout(layout)
 
     def toggle_auto_save(self, state):
         """切换自动保存状态"""
         self.auto_save_enabled = (state == Qt.Checked)
-        # 移除在没有端口名的情况下创建日志文件的逻辑
-        # 日志文件将在连接串口时创建
+        # 如果当前已连接且状态变为启用，创建新的日志文件
+        if self.auto_save_enabled and self.serial_receiver and self.serial_receiver.is_connected:
+            self.create_new_log_file(self.serial_receiver.config.port)
+        # 如果状态变为禁用，关闭当前日志文件
+        elif not self.auto_save_enabled and self.current_log_file and not self.current_log_file.closed:
+            self.current_log_file.close()
+            self.current_log_file = None
 
     def create_new_log_file(self):
         """创建新的日志文件"""
@@ -556,7 +552,7 @@ class SerialReceiverApp(QMainWindow):
         control_layout.addWidget(self.refresh_btn)
 
         self.global_auto_save_check = QCheckBox("全局自动保存")
-        self.global_auto_save_check.setChecked(True)
+        self.global_auto_save_check.setChecked(False)
         self.global_auto_save_check.stateChanged.connect(self.toggle_global_auto_save)
         control_layout.addWidget(self.global_auto_save_check)
 
