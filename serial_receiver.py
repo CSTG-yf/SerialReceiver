@@ -193,6 +193,13 @@ class SerialReceiver(QThread):
                         self.error_occurred.emit(f"系统错误: {str(e)}")
                         break
 
+                except Exception as e:
+                    error_count += 1
+                    if error_count >= max_error_count:
+                        self.error_occurred.emit(f"发生错误: {str(e)}")
+                        break
+                    self.msleep(100)  # 短暂延迟后重试
+
         except serial.SerialException as e:
             error_msg = f"串口连接错误: {str(e)}"
             if "PermissionError" in str(e):
@@ -252,12 +259,18 @@ class SerialReceiver(QThread):
 
         return '\n'.join(output) if output else None
 
+    # 在SerialReceiver类中修改
     def cleanup(self):
         """彻底清理串口资源"""
         self._should_stop = True
-        if self.isRunning():
-            self.wait(2000)  # 等待更长时间确保线程结束
 
+        # 更安全的线程终止方式
+        if self.isRunning():
+            self.wait(2000)  # 等待线程结束，最多2秒
+            if self.isRunning():
+                self.terminate()  # 强制终止线程
+
+        # 确保串口关闭
         if self.serial_port:
             try:
                 self.serial_port.close()
