@@ -34,6 +34,8 @@ class SerialPortWidget(QGroupBox):
         self.pending_update = False  # 是否有待更新的数据
         self.file_write_buffer = ""
         self.file_write_threshold = 8192  # 8KB写入阈值
+        self.auto_scroll_enabled = True  # 默认启用自动滚动
+        self.last_scroll_position = 0
         # 创建日志目录
         import os
         os.makedirs(self.log_dir, exist_ok=True)
@@ -41,6 +43,7 @@ class SerialPortWidget(QGroupBox):
         # 移除初始化日志文件的调用
         # 创建UI
         self.init_ui()
+        self.receive_text.verticalScrollBar().valueChanged.connect(self._handle_scroll_event)
 
     def init_ui(self):
         layout = QVBoxLayout()
@@ -124,6 +127,21 @@ class SerialPortWidget(QGroupBox):
         layout.addWidget(control_group)
         self.setLayout(layout)
 
+    def _handle_scroll_event(self, value):
+        """处理滚动事件，判断是否用户手动滚动"""
+        scrollbar = self.receive_text.verticalScrollBar()
+        max_scroll = scrollbar.maximum()
+
+        # 更新最后滚动位置
+        self.last_scroll_position = value
+
+        # 如果用户滚动到接近底部(留10px缓冲)，则启用自动滚动
+        if value >= max_scroll - 10:
+            self.auto_scroll_enabled = True
+        else:
+            # 用户手动滚动到上方，禁用自动滚动
+            self.auto_scroll_enabled = False
+
     def toggle_auto_save(self, state):
         """切换自动保存状态"""
         self.auto_save_enabled = (state == Qt.Checked)
@@ -170,6 +188,7 @@ class SerialPortWidget(QGroupBox):
                 self.show_error(f"日志写入失败: {str(e)}")
 
         # 2. 追加新数据到显示缓冲区
+        prev_length = len(self.data_buffer)
         self.data_buffer += data
         if len(self.data_buffer) > self.max_buffer_length:
             # 保留最新数据，丢弃旧数据
@@ -188,6 +207,7 @@ class SerialPortWidget(QGroupBox):
         # 4. 更新显示（如果未暂停）
         if not self.is_display_paused:
             self.pending_update = True
+            self.update_display()  # 直接调用更新显示
 
         # 5. 更新详情窗口（如果存在）
         if hasattr(self, '_data_window') and self._data_window.isVisible():
@@ -195,8 +215,18 @@ class SerialPortWidget(QGroupBox):
 
     def closeEvent(self, event):
         """清理资源"""
+        # 关闭详情窗口
+        if hasattr(self, '_data_window'):
+            self._data_window.close()
+            del self._data_window
+
+        # 断开串口连接
+        self.disconnect_serial()
+
+        # 关闭日志文件
         if self.current_log_file and not self.current_log_file.closed:
             self.current_log_file.close()
+
         super().closeEvent(event)
 
     def refresh_ports(self, ports: list):
@@ -254,24 +284,64 @@ class SerialPortWidget(QGroupBox):
             # 恢复显示时更新显示内容（从缓冲区）
             self.update_display()
 
-    def update_display(self, new_data=""):
-        """更新显示内容，保留空白行"""
-        if self.is_display_paused:
+    def update_display(self):
+        """更新显示内容，智能控制滚动行为"""
+        if self.is_display_paused or not self.pending_update:
             return
+
         self.pending_update = False
-        self.receive_text.setPlainText(self.parsed_data_buffer)
-        self.receive_text.ensureCursorVisible()
-        # 如果提供了新数据，只追加新数据
-        if new_data:
-            cursor = self.receive_text.textCursor()
+
+        # 获取当前滚动条状态
+        scrollbar = self.receive_text.verticalScrollBar()
+        was_at_bottom = scrollbar.value() == scrollbar.maximum()
+        old_max = scrollbar.maximum()
+        old_value = scrollbar.value()
+
+        # 获取当前文本和新数据
+        current_text = self.receive_text.toPlainText()
+        new_data = self.parsed_data_buffer[len(current_text):]
+
+        if not new_data:
+            return
+
+        # 保存当前光标和选择状态
+        cursor = self.receive_text.textCursor()
+        old_pos = cursor.position()
+        old_anchor = cursor.anchor()
+        had_selection = old_pos != old_anchor
+
+        # 禁用重绘以提高性能
+        self.receive_text.setUpdatesEnabled(False)
+
+        try:
+            # 追加新数据
             cursor.movePosition(cursor.End)
             cursor.insertText(new_data)
-        else:
-            # 否则刷新整个显示（从缓冲区）
-            self.receive_text.setPlainText(self.parsed_data_buffer)
 
-        # 自动滚动到底部
-        self.receive_text.ensureCursorVisible()
+            # 恢复用户选择/光标位置
+            if had_selection:
+                new_cursor = self.receive_text.textCursor()
+                new_cursor.setPosition(min(old_anchor, old_pos))
+                new_cursor.setPosition(max(old_anchor, old_pos), cursor.KeepAnchor)
+                self.receive_text.setTextCursor(new_cursor)
+            else:
+                new_cursor = self.receive_text.textCursor()
+                new_cursor.setPosition(old_pos)
+                self.receive_text.setTextCursor(new_cursor)
+
+            # 计算新的滚动位置
+            if was_at_bottom or self.auto_scroll_enabled:
+                # 自动滚动到底部
+                scrollbar.setValue(scrollbar.maximum())
+            else:
+                # 保持相对位置
+                delta = scrollbar.maximum() - old_max
+                new_value = old_value + delta
+                scrollbar.setValue(new_value)
+
+        finally:
+            # 重新启用重绘
+            self.receive_text.setUpdatesEnabled(True)
 
     def clear_error(self):
         """清除错误信息"""
@@ -396,16 +466,25 @@ class SerialPortWidget(QGroupBox):
     def disconnect_serial(self):
         """断开串口连接"""
         if self.serial_receiver:
-            # 先停止数据接收
+            # 先断开信号连接
+            try:
+                self.serial_receiver.data_received.disconnect()
+                self.serial_receiver.error_occurred.disconnect()
+            except TypeError:
+                pass  # 信号未连接时忽略
+
+            # 停止并清理接收器
             self.serial_receiver.disconnect()
+            self.serial_receiver.cleanup()
+
+            # 等待线程结束
+            if self.serial_receiver.isRunning():
+                self.serial_receiver.wait(2000)  # 最多等待2秒
 
             # 关闭日志文件
             if self.current_log_file and not self.current_log_file.closed:
                 self.current_log_file.close()
                 self.current_log_file = None
-
-            # 执行彻底清理
-            self.serial_receiver.cleanup()
 
             # 删除对象
             del self.serial_receiver
@@ -420,13 +499,14 @@ class SerialPortWidget(QGroupBox):
         import gc
         gc.collect()
 
-
-
     def clear_receive(self):
         """清空接收区"""
         self.receive_text.clear()
         self.parsed_data_buffer = ""
         self.data_buffer = ""
+        self.pending_update = False
+        self.auto_scroll_enabled = True  # 重置为自动滚动
+        self.last_scroll_position = 0
 
     def save_data(self):
         """保存数据到文件"""
@@ -487,10 +567,17 @@ class PortDataWindow(QMainWindow):
     def append_data(self, data: str, is_parent_paused=False):
         """追加新数据"""
         if not is_parent_paused:  # 只根据父窗口的暂停状态决定是否更新
+            # 获取当前滚动条位置
+            scrollbar = self.data_text.verticalScrollBar()
+            at_bottom = scrollbar.value() == scrollbar.maximum()
+
             cursor = self.data_text.textCursor()
             cursor.movePosition(cursor.End)
             cursor.insertText(data)
-            self.data_text.ensureCursorVisible()
+
+            # 如果之前是在底部，保持滚动到底部
+            if at_bottom:
+                self.data_text.ensureCursorVisible()
 
     def clear_data(self):
         """清空数据"""
@@ -692,8 +779,21 @@ class SerialReceiverApp(QMainWindow):
 
     def closeEvent(self, event):
         """窗口关闭事件处理"""
+        # 先断开所有串口连接
         for widget in self.port_widgets:
             widget.disconnect_serial()
+
+        # 清理所有控件
+        for widget in self.port_widgets:
+            widget.setParent(None)
+            widget.deleteLater()
+
+        self.port_widgets.clear()
+
+        # 强制垃圾回收
+        import gc
+        gc.collect()
+
         event.accept()
 
 

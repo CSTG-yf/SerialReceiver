@@ -264,6 +264,13 @@ class SerialReceiver(QThread):
         """彻底清理串口资源"""
         self._should_stop = True
 
+        # 断开所有信号连接
+        try:
+            self.data_received.disconnect()
+            self.error_occurred.disconnect()
+        except TypeError:
+            pass  # 信号未连接时忽略
+
         # 更安全的线程终止方式
         if self.isRunning():
             self.wait(2000)  # 等待线程结束，最多2秒
