@@ -36,6 +36,14 @@ class SerialPortWidget(QGroupBox):
         self.file_write_threshold = 8192  # 8KB写入阈值
         self.auto_scroll_enabled = True  # 默认启用自动滚动
         self.last_scroll_position = 0
+
+        self.full_refresh_timer = QTimer()
+        self.full_refresh_timer.timeout.connect(self.full_refresh_display)
+        self.full_refresh_timer.start(120000)  # 2分钟全量刷新一次
+
+        # 添加标记是否需要全量刷新
+        self.need_full_refresh = False
+
         # 创建日志目录
         import os
         os.makedirs(self.log_dir, exist_ok=True)
@@ -165,53 +173,140 @@ class SerialPortWidget(QGroupBox):
         self.bytes_written = 0
         print(f"创建新的日志文件: {filename}")  # 调试信息
 
+    def full_refresh_display(self):
+        """触发全量刷新"""
+        self.need_full_refresh = True
+        self.update_display()
+
+    def update_display(self):
+        """更新显示内容，智能控制滚动行为"""
+        if self.is_display_paused:
+            return
+
+        try:
+            if self.need_full_refresh:
+                # 全量刷新模式
+                self.need_full_refresh = False
+                self.receive_text.setUpdatesEnabled(False)
+                try:
+                    # 保留最新的max_display_length个字符
+                    display_text = self.parsed_data_buffer[-self.max_display_length:]
+                    self.receive_text.setPlainText(display_text)
+
+                    # 自动滚动处理
+                    scrollbar = self.receive_text.verticalScrollBar()
+                    if self.auto_scroll_enabled or scrollbar.value() == scrollbar.maximum():
+                        scrollbar.setValue(scrollbar.maximum())
+                finally:
+                    self.receive_text.setUpdatesEnabled(True)
+                return
+
+            # 原来的增量刷新逻辑
+            if not self.pending_update:
+                return
+
+            # 重置标志
+            self.pending_update = False
+
+            # 获取当前显示的文本
+            current_text = self.receive_text.toPlainText()
+            new_data = self.parsed_data_buffer[len(current_text):]
+
+            if not new_data:
+                return
+
+            # 使用高性能方式更新显示
+            self.receive_text.setUpdatesEnabled(False)
+            cursor = self.receive_text.textCursor()
+
+            try:
+                # 移动到文档末尾
+                cursor.movePosition(cursor.End)
+
+                # 计算需要保留的数据量
+                available_space = self.max_display_length - len(new_data)
+
+                # 如果空间不足，删除最老的数据
+                if available_space < 0:
+                    # 完全清空，只显示新数据
+                    cursor.select(cursor.Document)
+                    cursor.removeSelectedText()
+                elif len(current_text) > available_space:
+                    # 删除部分老数据，保留足够的空间给新数据
+                    remove_count = len(current_text) - available_space
+                    cursor.setPosition(0)
+                    cursor.movePosition(cursor.Right, cursor.KeepAnchor, remove_count)
+                    cursor.removeSelectedText()
+                    cursor.movePosition(cursor.End)
+
+                # 插入新数据
+                cursor.insertText(new_data)
+
+                # 自动滚动处理
+                scrollbar = self.receive_text.verticalScrollBar()
+                if self.auto_scroll_enabled or scrollbar.value() == scrollbar.maximum():
+                    scrollbar.setValue(scrollbar.maximum())
+            finally:
+                self.receive_text.setUpdatesEnabled(True)
+                # 确保UI更新
+                QApplication.processEvents()
+
+        except Exception as e:
+            print(f"更新显示错误: {str(e)}")
+            # 出错时重置缓冲区
+            self.parsed_data_buffer = ""
+            self.receive_text.clear()
+
     def on_data_received(self, data: str):
         """数据接收回调，只处理GNRMC和GNGGA"""
         if not self.is_receiving:
             return
 
-        # 1. 写入文件（仅在连接时且自动保存启用时）
-        if (self.auto_save_enabled and self.current_log_file
-                and self.serial_receiver and self.serial_receiver.is_connected):
-            try:
-                self.file_write_buffer += data
-                if len(self.file_write_buffer) >= self.file_write_threshold:
-                    self.current_log_file.write(self.file_write_buffer)
-                    self.current_log_file.flush()
-                    self.bytes_written += len(self.file_write_buffer.encode('utf-8'))
-                    self.file_write_buffer = ""
+        try:
+            # 1. 写入文件（仅在连接时且自动保存启用时）
+            if (self.auto_save_enabled and self.current_log_file
+                    and self.serial_receiver and self.serial_receiver.is_connected):
+                try:
+                    self.file_write_buffer += data
+                    if len(self.file_write_buffer) >= self.file_write_threshold:
+                        self.current_log_file.write(self.file_write_buffer)
+                        self.current_log_file.flush()
+                        self.bytes_written += len(self.file_write_buffer.encode('utf-8'))
+                        self.file_write_buffer = ""
 
-                if self.bytes_written >= self.max_file_size:
-                    port_name = self.serial_receiver.config.port
-                    self.create_new_log_file(port_name)
-            except IOError as e:
-                self.show_error(f"日志写入失败: {str(e)}")
+                    if self.bytes_written >= self.max_file_size:
+                        port_name = self.serial_receiver.config.port
+                        self.create_new_log_file(port_name)
+                except IOError as e:
+                    self.show_error(f"日志写入失败: {str(e)}")
 
-        # 2. 追加新数据到显示缓冲区
-        prev_length = len(self.data_buffer)
-        self.data_buffer += data
-        if len(self.data_buffer) > self.max_buffer_length:
-            # 保留最新数据，丢弃旧数据
-            self.data_buffer = self.data_buffer[-self.max_buffer_length:]
-        # 3. 解析数据（只处理GNRMC和GNGGA）
-        self.data_buffer += data
+            # 2. 追加新数据到显示缓冲区
+            self.data_buffer += data
+            if len(self.data_buffer) > self.max_buffer_length:
+                # 保留最新数据，丢弃旧数据
+                self.data_buffer = self.data_buffer[-self.max_buffer_length:]
 
-        parsed_data = self.serial_receiver.parse_nmea_data(data)
-        if parsed_data:
-            self.parsed_data_buffer += parsed_data
+            # 3. 解析数据（只处理GNRMC和GNGGA）
+            parsed_data = self.serial_receiver.parse_nmea_data(data)
+            if parsed_data:
+                self.parsed_data_buffer += parsed_data
 
-            if len(self.parsed_data_buffer) > self.max_display_length * 1.2:
-                self.parsed_data_buffer = self.parsed_data_buffer[-self.max_display_length:]
+                if len(self.parsed_data_buffer) > self.max_display_length:
+                    # 保留最新数据，但确保不会丢失当前解析的数据
+                    keep_length = min(len(parsed_data), self.max_display_length)
+                    self.parsed_data_buffer = self.parsed_data_buffer[-keep_length:]
 
+                # 4. 标记需要更新显示
+                self.pending_update = True
+                # 立即请求UI更新
+                QApplication.processEvents()
 
-        # 4. 更新显示（如果未暂停）
-        if not self.is_display_paused:
-            self.pending_update = True
-            self.update_display()  # 直接调用更新显示
+            # 5. 更新详情窗口（如果存在）
+            if hasattr(self, '_data_window') and self._data_window.isVisible():
+                self._data_window.append_data(data, self.is_display_paused)
 
-        # 5. 更新详情窗口（如果存在）
-        if hasattr(self, '_data_window') and self._data_window.isVisible():
-            self._data_window.append_data(data, self.is_display_paused)
+        except Exception as e:
+            print(f"数据接收处理错误: {str(e)}")
 
     def closeEvent(self, event):
         """清理资源"""
@@ -284,64 +379,7 @@ class SerialPortWidget(QGroupBox):
             # 恢复显示时更新显示内容（从缓冲区）
             self.update_display()
 
-    def update_display(self):
-        """更新显示内容，智能控制滚动行为"""
-        if self.is_display_paused or not self.pending_update:
-            return
 
-        self.pending_update = False
-
-        # 获取当前滚动条状态
-        scrollbar = self.receive_text.verticalScrollBar()
-        was_at_bottom = scrollbar.value() == scrollbar.maximum()
-        old_max = scrollbar.maximum()
-        old_value = scrollbar.value()
-
-        # 获取当前文本和新数据
-        current_text = self.receive_text.toPlainText()
-        new_data = self.parsed_data_buffer[len(current_text):]
-
-        if not new_data:
-            return
-
-        # 保存当前光标和选择状态
-        cursor = self.receive_text.textCursor()
-        old_pos = cursor.position()
-        old_anchor = cursor.anchor()
-        had_selection = old_pos != old_anchor
-
-        # 禁用重绘以提高性能
-        self.receive_text.setUpdatesEnabled(False)
-
-        try:
-            # 追加新数据
-            cursor.movePosition(cursor.End)
-            cursor.insertText(new_data)
-
-            # 恢复用户选择/光标位置
-            if had_selection:
-                new_cursor = self.receive_text.textCursor()
-                new_cursor.setPosition(min(old_anchor, old_pos))
-                new_cursor.setPosition(max(old_anchor, old_pos), cursor.KeepAnchor)
-                self.receive_text.setTextCursor(new_cursor)
-            else:
-                new_cursor = self.receive_text.textCursor()
-                new_cursor.setPosition(old_pos)
-                self.receive_text.setTextCursor(new_cursor)
-
-            # 计算新的滚动位置
-            if was_at_bottom or self.auto_scroll_enabled:
-                # 自动滚动到底部
-                scrollbar.setValue(scrollbar.maximum())
-            else:
-                # 保持相对位置
-                delta = scrollbar.maximum() - old_max
-                new_value = old_value + delta
-                scrollbar.setValue(new_value)
-
-        finally:
-            # 重新启用重绘
-            self.receive_text.setUpdatesEnabled(True)
 
     def clear_error(self):
         """清除错误信息"""
@@ -446,10 +484,14 @@ class SerialPortWidget(QGroupBox):
 
     def manual_cleanup(self):
         """手动清理内存"""
-        # 清理当前控件的缓冲区但保留最后10000字符
-        if len(self.data_buffer) > 10000:
-            self.data_buffer = self.data_buffer[-10000:]
-            self.receive_text.setPlainText(self.data_buffer)
+        # 清理当前控件的缓冲区但保留最后100000字符
+        if len(self.data_buffer) > 100000:
+            self.data_buffer = self.data_buffer[-100000:]
+        if len(self.parsed_data_buffer) > 100000:
+            self.parsed_data_buffer = self.parsed_data_buffer[-100000:]
+
+        # 更新显示
+        self.receive_text.setPlainText(self.parsed_data_buffer[-100000:])
 
         # 强制垃圾回收
         import gc
